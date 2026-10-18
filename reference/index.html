@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>Teachable Machine Poses</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8.6/dist/teachablemachine-pose.min.js" defer></script>
+    <script src="script.js" defer></script>
+    <script src="drawing.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-group header-group--left">
+        <span class="header-label">GSAPP</span>
+        <span class="header-detail">Columbia University</span>
+      </div>
+
+      <div class="header-group header-group--center">
+        <h1>Teachable Machine Poses</h1>
+        <span class="header-detail">Spatial AI . Session 01 . Workshop</span>
+      </div>
+
+      <div class="header-actions">
+        <div class="drawing-tools" role="group" aria-label="Drawing tools">
+          <button class="drawing-tool-button" id="draw-toggle" type="button" aria-controls="drawing-canvas" aria-pressed="false">Draw</button>
+          <button class="drawing-tool-button" id="clear-drawing" type="button" aria-controls="drawing-canvas">Clear</button>
+        </div>
+        <div class="header-group header-group--right">
+          <span class="header-label">Varun SA</span>
+          <span class="header-detail">MS CDP</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="site-body">
+      <section class="model-panel" aria-labelledby="model-title">
+        <div class="model-instructions">
+          <h2 id="model-title">Pose classifier</h2>
+          <p class="panel-description">I trained an AI model on 3 poses—dab, flex, and wave—in Teachable Machine. Switch on the webcam and try them out to see if the AI can recognize you doing them correctly!</p>
+          <p id="status" role="status" aria-live="polite"></p>
+        </div>
+        <div class="reference-images" aria-label="Pose and training examples">
+          <div class="pose-images">
+            <figure class="pose-item">
+              <img src="images/dab.png" alt="dab pose" />
+              <figcaption class="pose-label">dab</figcaption>
+            </figure>
+            <figure class="pose-item">
+              <img src="images/flex.png" alt="flex pose" />
+              <figcaption class="pose-label">flex</figcaption>
+            </figure>
+            <figure class="pose-item">
+              <img src="images/wave.png" alt="wave pose" />
+              <figcaption class="pose-label">wave</figcaption>
+            </figure>
+          </div>
+          <figure class="training-item">
+            <img class="training-image" src="images/training.png" alt="training in Teachable machine" />
+            <figcaption class="training-label">training in <a href="https://teachablemachine.withgoogle.com/train" target="_blank" rel="noopener noreferrer">Teachable Machine</a></figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="camera-panel" aria-label="Webcam and pose predictions">
+        <div class="camera-results">
+          <div class="camera-view">
+            <button id="camera-toggle" type="button" aria-controls="canvas label-container" aria-label="Start camera" aria-pressed="false" title="Start camera">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z" />
+                <circle cx="12" cy="13" r="3.5" />
+                <path class="camera-cross" d="M3 3l18 18M21 3L3 21" />
+              </svg>
+            </button>
+            <p id="camera-placeholder">Your webcam will appear here.</p>
+            <canvas id="canvas" width="400" height="400" aria-label="Mirrored webcam with pose skeleton" hidden></canvas>
+          </div>
+          <div id="label-container" aria-label="Pose predictions" hidden></div>
+        </div>
+      </section>
+    </main>
+    <canvas class="drawing-canvas" id="drawing-canvas" aria-hidden="true"></canvas>
+  </body>
+</html>

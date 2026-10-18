@@ -1,0 +1,45 @@
+# HTTPS front door for the GPU server, so the GitHub Pages site (https) can reach it.
+#
+# - Behind an HTTPS tunnel (Brev secure link or `cloudflared tunnel --url http://localhost:80`):
+#   leave SITE_ADDRESS unset. Caddy serves plain HTTP on :80 and the tunnel adds HTTPS.
+# - Your own domain pointed at the machine, with ports 80 and 443 open
+#   (e.g. SITE_ADDRESS=twindrop.example.com): Caddy gets a free Let's Encrypt certificate.
+{$SITE_ADDRESS::80} {
+	# Status, slot booking and NVIDIA's browser client, served by viewer.py.
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8090
+	}
+	handle /vendor/* {
+		reverse_proxy 127.0.0.1:8090
+	}
+
+	# WebRTC signaling for each viewer slot: /slot/N/sign_in -> port 49100 + N.
+	handle_path /slot/0/* {
+		reverse_proxy 127.0.0.1:49100
+	}
+	handle_path /slot/1/* {
+		reverse_proxy 127.0.0.1:49101
+	}
+	handle_path /slot/2/* {
+		reverse_proxy 127.0.0.1:49102
+	}
+	handle_path /slot/3/* {
+		reverse_proxy 127.0.0.1:49103
+	}
+	handle_path /slot/4/* {
+		reverse_proxy 127.0.0.1:49104
+	}
+	handle_path /slot/5/* {
+		reverse_proxy 127.0.0.1:49105
+	}
+	handle_path /slot/6/* {
+		reverse_proxy 127.0.0.1:49106
+	}
+	handle_path /slot/7/* {
+		reverse_proxy 127.0.0.1:49107
+	}
+
+	handle {
+		respond "TwinDrop Omniverse server is running." 200
+	}
+}

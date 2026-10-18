@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>TwinDrop</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="config.js" defer></script>
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="header-group header-group--left">
+        <span class="header-label">GSAPP</span>
+        <span class="header-detail">Columbia University</span>
+      </div>
+
+      <div class="header-group header-group--center">
+        <h1>TwinDrop</h1>
+        <span class="header-detail">Simulations, Models, Twins</span>
+      </div>
+
+      <div class="header-group header-group--right">
+        <span class="header-label">Varun SA</span>
+        <span class="header-detail">MS CDP</span>
+      </div>
+    </header>
+
+    <main class="site-body">
+      <div class="viewport" id="viewport">
+        <!-- The Omniverse stream. tabindex lets it take keyboard focus for WASDQE. -->
+        <video id="remote-video" tabindex="-1" autoplay playsinline muted></video>
+        <audio id="remote-audio" muted></audio>
+
+        <div class="viewport-overlay" id="overlay">
+          <p class="overlay-title">Omniverse viewport</p>
+          <p class="overlay-status" id="status" role="status" aria-live="polite">Rendered live on an NVIDIA RTX GPU and streamed to your browser.</p>
+          <button class="overlay-button" id="start" type="button">Launch viewport</button>
+        </div>
+
+        <p class="viewport-badge" id="badge" hidden></p>
+        <p class="viewport-hint">WASD move · Q/E down/up · drag to look · Shift faster</p>
+      </div>
+    </main>
+  </body>
+</html>
