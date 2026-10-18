@@ -10,6 +10,11 @@ USD (convert.py), and serves a small HTTP API (default 127.0.0.1:8090) for the w
     GET  /api/release?slot=&token=           give a claimed slot back (e.g. after an error)
     GET  /vendor/ov-web-rtc.umd.js           NVIDIA's browser client (see fetch_client.py)
 
+For the web (three.js) viewer, files the browser can't read itself are converted to GLB:
+    POST /api/glb?name=                      upload a 3D file (body = file) -> {job}
+    GET  /api/glb?job=                       progress: converting/ready/error
+    GET  /api/glb/file?job=                  the converted .glb
+
 Usage:
     python viewer.py                                   # local test, 2 slots
     python viewer.py --slots 4 --public-ip 1.2.3.4     # cloud GPU
@@ -35,7 +40,21 @@ SERVER_DIR = Path(__file__).resolve().parent
 CLIENT_LIBRARY = SERVER_DIR / "vendor" / "ov-web-rtc.umd.js"
 UPLOADS = SERVER_DIR / "uploads"
 CLAIM_SECONDS = 60          # a claimed slot is held this long without the browser checking in
+GLB_KEEP_SECONDS = 15 * 60  # converted GLBs for the web viewer are deleted after this
 CONVERSIONS = threading.Semaphore(2)  # conversions are CPU-heavy; run at most two at once
+
+
+def save_body(body, length: int, path: Path) -> bool:
+    """Stream an upload to disk; False if the connection ended early."""
+    with open(path, "wb") as out:
+        remaining = length
+        while remaining > 0:
+            chunk = body.read(min(remaining, 1 << 20))
+            if not chunk:
+                break
+            out.write(chunk)
+            remaining -= len(chunk)
+    return remaining == 0
 
 
 def converter_python() -> str:
@@ -157,6 +176,7 @@ class Manager:
         self.args = args
         self.slots = [Slot(i, args) for i in range(args.slots)]
         self.lock = threading.Lock()
+        self.glb_jobs = {}  # web viewer conversions: id -> {state, message, folder, created, path}
 
     def start_slots(self) -> None:
         # Start one slot first so it compiles and caches shaders; the rest then start quickly.
@@ -175,6 +195,11 @@ class Manager:
                     if slot.token and not slot.connected and now > slot.claimed_until:
                         print(f"[slot {slot.index}] claim expired", flush=True)
                         slot.release()
+            # Converted GLBs are kept for a while so the browser can download them, then deleted.
+            for job_id, job in list(self.glb_jobs.items()):
+                if job["state"] != "converting" and now - job["created"] > GLB_KEEP_SECONDS:
+                    shutil.rmtree(job["folder"], ignore_errors=True)
+                    del self.glb_jobs[job_id]
 
     def find(self, query: dict):
         """The slot named in the query, if the token matches its current claim."""
@@ -206,32 +231,31 @@ class Manager:
             return 503, {"error": "warming_up"}
         return 503, {"error": "full"}
 
+    def check_upload(self, query: dict, length: int):
+        """Return (safe file name, None) or (None, error response)."""
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(query.get("name", ["model"])[0]).name)[-100:]
+        if Path(name).suffix.lower() not in SUPPORTED:
+            return None, (400, {"error": f"{Path(name).suffix or 'This'} files are not supported."})
+        if length > self.args.max_upload_mb * 1024 * 1024:
+            return None, (413, {"error": f"Files up to {self.args.max_upload_mb} MB are supported."})
+        if not converter_python():
+            return None, (500, {"error": "File conversion is not set up on the server."})
+        return name, None
+
     def upload(self, query: dict, length: int, body) -> tuple:
         slot = self.find(query)
         if slot is None:
             return 403, {"error": "This viewport reservation has expired. Please try again."}
-        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(query.get("name", ["model"])[0]).name)[-100:]
-        if Path(name).suffix.lower() not in SUPPORTED:
-            return 400, {"error": f"{Path(name).suffix or 'This'} files are not supported."}
-        if length > self.args.max_upload_mb * 1024 * 1024:
-            return 413, {"error": f"Files up to {self.args.max_upload_mb} MB are supported."}
-        if not converter_python():
-            return 500, {"error": "File conversion is not set up on the server."}
+        name, error = self.check_upload(query, length)
+        if error:
+            return error
 
         folder = UPLOADS / f"slot{slot.index}" / slot.token
         folder.mkdir(parents=True, exist_ok=True)
         slot.job_dir = folder
         slot.claimed_until = time.monotonic() + 3600  # hold the slot while a slow upload arrives
         path = folder / name
-        with open(path, "wb") as out:
-            remaining = length
-            while remaining > 0:
-                chunk = body.read(min(remaining, 1 << 20))
-                if not chunk:
-                    break
-                out.write(chunk)
-                remaining -= len(chunk)
-        if remaining > 0:
+        if not save_body(body, length, path):
             slot.claimed_until = time.monotonic() + CLAIM_SECONDS
             return 400, {"error": "The upload was interrupted. Please try again."}
         slot.job = {"state": "converting", "message": ""}
@@ -270,6 +294,50 @@ class Manager:
                 slot.release()
         return 200, {"ok": True}
 
+    # -- GLB conversion for the web viewer (no GPU slot needed) ------------------------------
+    def glb_upload(self, query: dict, length: int, body) -> tuple:
+        name, error = self.check_upload(query, length)
+        if error:
+            return error
+        job_id = secrets.token_urlsafe(12)
+        folder = UPLOADS / "glb" / job_id
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / name
+        if not save_body(body, length, path):
+            shutil.rmtree(folder, ignore_errors=True)
+            return 400, {"error": "The upload was interrupted. Please try again."}
+        self.glb_jobs[job_id] = {"state": "converting", "message": "", "folder": folder, "created": time.monotonic()}
+        threading.Thread(target=self.glb_convert, args=(job_id, path), daemon=True).start()
+        return 202, {"job": job_id}
+
+    def glb_convert(self, job_id: str, path: Path) -> None:
+        with CONVERSIONS:
+            started = time.monotonic()
+            result = subprocess.run([converter_python(), str(SERVER_DIR / "convert.py"), str(path), str(path.parent), "--glb"],
+                                    cwd=SERVER_DIR, capture_output=True, text=True, errors="replace")
+        lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+        outcome = json.loads(lines[-1]) if lines else {"ok": False, "error": "Conversion failed."}
+        print(f"[web] converted {path.name} to GLB in {time.monotonic() - started:.0f}s: "
+              f"{outcome.get('converter') or outcome.get('error')}", flush=True)
+        job = self.glb_jobs.get(job_id)
+        if job is None:
+            return
+        if outcome["ok"]:
+            job.update(state="ready", path=outcome["glb"])
+        else:
+            job.update(state="error", message=outcome["error"])
+
+    def glb_status(self, query: dict):
+        job = self.glb_jobs.get(query.get("job", [""])[0])
+        if job is None:
+            return 404, {"state": "expired"}
+        return 200, {"state": job["state"], "message": job["message"]}
+
+    def glb_file(self, query: dict):
+        """The converted GLB (path), or None."""
+        job = self.glb_jobs.get(query.get("job", [""])[0])
+        return job.get("path") if job else None
+
     def serve(self) -> ThreadingHTTPServer:
         manager = self
 
@@ -301,6 +369,11 @@ class Manager:
                     self._json(*manager.job(query))
                 elif url.path == "/api/release":
                     self._json(*manager.release(query))
+                elif url.path == "/api/glb":
+                    self._json(*manager.glb_status(query))
+                elif url.path == "/api/glb/file" and manager.glb_file(query):
+                    self._headers(200, "model/gltf-binary")
+                    self.wfile.write(Path(manager.glb_file(query)).read_bytes())
                 elif url.path == "/vendor/ov-web-rtc.umd.js" and CLIENT_LIBRARY.exists():
                     self._headers(200, "text/javascript")
                     self.wfile.write(CLIENT_LIBRARY.read_bytes())
@@ -309,10 +382,13 @@ class Manager:
 
             def do_POST(self):
                 url = urlparse(self.path)
-                if url.path != "/api/upload":
-                    return self._json(404, {"error": "not found"})
                 length = int(self.headers.get("Content-Length") or 0)
-                self._json(*manager.upload(parse_qs(url.query), length, self.rfile))
+                if url.path == "/api/upload":
+                    self._json(*manager.upload(parse_qs(url.query), length, self.rfile))
+                elif url.path == "/api/glb":
+                    self._json(*manager.glb_upload(parse_qs(url.query), length, self.rfile))
+                else:
+                    self._json(404, {"error": "not found"})
 
             def log_message(self, *args):
                 pass

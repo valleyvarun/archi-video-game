@@ -1,44 +1,64 @@
 # archi-video-game
 
-TwinDrop — a web page with a live **NVIDIA Omniverse** USD viewport.
+TwinDrop — a web page where visitors drop a 3D file (Rhino, Revit, Blender, IFC, STEP, FBX,
+glTF, USD, …) and walk around it. The page offers two viewers:
 
-Visitors drop a 3D file (Rhino, Revit, Blender, IFC, STEP, FBX, glTF, USD, …) on the page
-and click **Launch viewport**. The GPU server converts the file to USD, renders it with
-**ovrtx** (Omniverse RTX renderer) and streams it to the browser over WebRTC with
-**ovstream**. The browser only plays the video and sends mouse and keyboard back, so the
-website itself is plain HTML/CSS/JS on GitHub Pages.
+- **Web viewer** (the default, for everyone): the file is converted to **GLB** (binary glTF
+  2.0, the standard 3D format for the web) and rendered by **three.js** on the visitor's own
+  computer. Most formats are converted right in the browser, so the file never leaves the
+  visitor's computer and no server is needed. Formats no browser can read (Revit, DWG,
+  SolidWorks, Blender, …) are converted to GLB by the TwinDrop server.
+- **Omniverse RTX viewer**: the GPU server converts the file to USD, renders it with
+  **ovrtx** (Omniverse RTX renderer) and streams it over WebRTC with **ovstream**.
+  Photoreal, but a few viewers per GPU.
 
 ```
-Visitors' browsers ── https ──> GitHub Pages  (index.html, styles.css, script.js, config.js)
-        │
-        │ https / wss (control, uploads)    UDP (video)
-        ▼                                     ▲
+Visitors' browsers ── https ──> GitHub Pages  (index.html, script.js, web/, omniverse.js, config.js)
+   │  Web viewer: three.js + in-browser converters (rhino3dm, web-ifc, OpenCascade) — no server
+   │
+   │ https / wss (uploads, control)    UDP (RTX video)
+   ▼                                     ▲
 GPU server (Brev cloud GPU, or your RTX PC for testing)
-   cloudflared tunnel → Caddy ─┬─ /api/*     → viewer.py: claim a slot, upload, conversion progress
+   cloudflared tunnel → Caddy ─┬─ /api/*     → viewer.py: uploads, conversions, RTX viewer slots
                                ├─ /vendor/*  → viewer.py: NVIDIA's browser client library
-                               └─ /slot/N/*  → WebRTC signaling for viewer N (port 49100 + N)
-   viewer.py (manager) ─┬─ convert.py: uploaded file → USD (NVIDIA CAD Converter or Blender)
+                               └─ /slot/N/*  → WebRTC signaling for RTX viewer N (port 49100 + N)
+   viewer.py (manager) ─┬─ convert.py: file → USD (RTX viewer) or GLB (web viewer)
                         └─ slot.py × N: ovstage (scene) → ovrtx (RTX render) → ovstream (WebRTC)
 ```
 
-**Many people at once:** one ovstream stream can only serve one browser, so the server runs
-several **slots** (`SLOTS`, default 4 on the cloud), each its own process with its own scene,
-camera and stream — every visitor sees only their own model. For more visitors, run more GPU
-servers and list them all in `config.js`; the page picks one with a free slot.
+**Many people at once:** the web viewer scales to any number of visitors (their own computers
+do the rendering). The RTX viewer runs one **slot** per simultaneous viewer (`SLOTS`), each its
+own process with its own scene, camera and stream. For more RTX viewers, run more GPU servers
+and list them all in `config.js`.
 
 ## Supported 3D files
+
+Both viewers accept the same files.
+
+**Web viewer — where each file is converted to GLB:**
+
+| Converted | File types |
+|---|---|
+| **In the browser** (file stays on the visitor's computer) | glTF `.gltf` `.glb` · OBJ `.obj` · FBX `.fbx` · Collada `.dae` · STL `.stl` · PLY `.ply` · 3MF `.3mf` · USD `.usd` `.usda` `.usdc` `.usdz` · Rhino `.3dm` (rhino3dm) · IFC `.ifc` (web-ifc) · STEP `.stp` `.step` · IGES `.igs` `.iges` (OpenCascade) · `.zip` of these with their textures |
+| **On the TwinDrop server** (needs the GPU server running) | Revit `.rvt` `.rfa` · AutoCAD `.dwg` `.dxf` · MicroStation `.dgn` · ACIS `.sat` · Parasolid `.x_t` `.x_b` · JT `.jt` · SolidWorks `.sldprt` `.sldasm` · Inventor `.ipt` `.iam` · CATIA `.catpart` `.catproduct` `.3dxml` · NX/Creo `.prt` · Navisworks `.nwd` · Blender `.blend` · Alembic `.abc` |
+
+Rhino files whose solids were saved without render meshes ("Save Small") are completed on
+the server when it is running; otherwise the browser shows what it can and says so. When
+the server is offline, server-only formats show a tip (e.g. "export IFC from Revit").
+
+**RTX viewer — everything is converted to USD on the GPU server:**
 
 | Converted by | File types |
 |---|---|
 | Nothing needed (already USD) | `.usd` `.usda` `.usdc` `.usdz` |
 | **NVIDIA CAD Converter** (`usd-convert-cad`, built on HOOPS Exchange) | Rhino `.3dm` · Revit `.rvt` `.rfa` · IFC `.ifc` · AutoCAD `.dwg` `.dxf` · MicroStation `.dgn` · STEP `.stp` `.step` · IGES `.igs` `.iges` · ACIS `.sat` · Parasolid `.x_t` `.x_b` · JT `.jt` · 3MF `.3mf` · SolidWorks `.sldprt` `.sldasm` · Inventor `.ipt` `.iam` · CATIA `.catpart` `.catproduct` `.3dxml` · NX/Creo `.prt` · Navisworks `.nwd` |
 | **Blender 4.5** (headless) | Blender `.blend` · FBX `.fbx` · OBJ `.obj` · glTF `.gltf` `.glb` · STL `.stl` · PLY `.ply` · Alembic `.abc` · Collada `.dae` |
-| Unzipped first | `.zip` holding one of the above plus its textures (e.g. `.gltf` + `.bin` + images, `.obj` + `.mtl`, USD + textures) |
+| Unzipped first | `.zip` holding one of the above plus its textures |
 
-Tested end to end: `.3dm` (incl. blocks), `.rvt`, `.ifc`, `.stp`, `.blend`, `.fbx`, `.obj`,
-`.glb`, `.usdz`, and a zipped `.gltf`. Uploads are limited to 100 MB (Cloudflare's limit).
-Models are turned Z-up and into metres; models far from the origin are centred on the grid.
-Lights and cameras inside uploaded files are ignored in favour of the viewer's own.
+Server uploads are limited to 100 MB (Cloudflare's limit); browser conversions are not.
+Models are shown Z-up in metres; models far from the origin are centred on the grid.
+Lights and cameras inside files are ignored in favour of the viewer's own. In the web
+viewer, **Download .glb** saves the converted model.
 
 ## Controls
 
@@ -49,12 +69,16 @@ view · hold Shift to move faster. Click into the viewport first so it receives 
 
 | Path | What it is |
 |---|---|
-| `index.html`, `styles.css`, `script.js` | The website |
+| `index.html`, `styles.css`, `script.js` | The website: viewer choice, drop zone, launch |
+| `web/viewer.js` | Web viewer: three.js scene, grid, axes, WASDQE camera |
+| `web/convert.js` | Web viewer: any 3D file → GLB, in the browser or via the server |
+| `omniverse.js` | RTX viewer: claims a GPU slot, uploads, plays the stream |
+| `formats.js` | Supported file types (keep in sync with `server/formats.py`) |
 | `config.js` | Which GPU server(s) the website connects to |
 | `server/viewer.py` | The manager: starts the slots, HTTP API, uploads, conversion jobs |
-| `server/slot.py` | One viewer slot: its own scene, RTX renderer and WebRTC stream |
-| `server/convert.py` | Uploaded file → USD, placed upright and in metres (runs in `.venv-convert`) |
-| `server/blender_export.py` | Runs inside Blender to export USD |
+| `server/slot.py` | One RTX viewer slot: its own scene, RTX renderer and WebRTC stream |
+| `server/convert.py` | Uploaded file → USD (RTX viewer) or GLB (web viewer); runs in `.venv-convert` |
+| `server/blender_export.py` | Runs inside Blender to export USD or GLB |
 | `server/formats.py` | Which file types go to which converter |
 | `server/scene.py` | The viewer's USD layer: camera, XY grid, XYZ axes, white sky light |
 | `server/fly_camera.py` | WASDQE fly camera |
@@ -76,8 +100,13 @@ committed here; each GPU server downloads it from NVIDIA's registry and serves i
 .\server\run.ps1        # start; the very first start compiles shaders (a few minutes)
 ```
 
-Wait for `Ready: 2 viewer slot(s)`, then double-click `index.html` and click
-**Launch viewport**. `config.js` points at `http://localhost:8090` by default.
+Wait for `Ready: 2 viewer slot(s)`. The page uses JavaScript modules, which browsers won't
+load from a double-clicked file, so serve the folder: in a second terminal run
+`python -m http.server 5500` in the project folder (or use VS Code's Live Server) and open
+`http://localhost:5500/?server=http://localhost:8090`.
+
+The web viewer needs no server at all for in-browser formats: just serve the folder and open
+`http://localhost:5500/`.
 Stop the server with Ctrl+C.
 
 Show a USD file too (path or URL; the viewer is Z-up):

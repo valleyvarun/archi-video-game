@@ -1,7 +1,8 @@
 """Turn an uploaded 3D file into USD the viewer can load.
 
 Runs in the converter environment (server/.venv-convert):
-    python convert.py <uploaded file> <output folder>
+    python convert.py <uploaded file> <output folder>          # USD for the Omniverse viewer
+    python convert.py <uploaded file> <output folder> --glb    # GLB for the web viewer
 
 Picks a converter by file type (see formats.py), then writes `placed.usda`: a small
 layer that references the converted model and turns it upright (Z up) and into metres.
@@ -18,7 +19,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, UsdShade
 
 from formats import ARCHIVE, BLENDER, CAD, USD
 
@@ -146,9 +147,62 @@ def Xform "Model"
     return layer, bounds
 
 
+def bake_material_inputs(usd: Path) -> Path:
+    """Copy material-level values (colour, roughness, ...) straight onto their shaders.
+
+    The CAD converter connects each UsdPreviewSurface input to an input on its Material.
+    That is valid USD, but Blender's importer doesn't follow those connections and would
+    turn every material white.
+    """
+    stage = Usd.Stage.Open(str(usd))
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdShade.Shader):
+            continue
+        for shader_input in UsdShade.Shader(prim).GetInputs():
+            sources = shader_input.GetConnectedSources()[0]
+            if sources and sources[0].source.GetPrim().IsA(UsdShade.Material):
+                value = sources[0].source.GetInput(sources[0].sourceName).Get()
+                if value is not None:
+                    shader_input.ClearSources()
+                    shader_input.Set(value)
+    baked = usd.with_name("for_blender.usdc")
+    stage.GetRootLayer().Export(str(baked))
+    return baked
+
+
+def convert_glb(source: Path, folder: Path) -> tuple[Path, str]:
+    """For the web viewer: return (GLB file, converter name). Blender writes the GLB."""
+    extension = source.suffix.lower()
+    if extension in ARCHIVE:
+        source = unpack_zip(source, folder)
+        extension = source.suffix.lower()
+    name = "Blender"
+    if extension in CAD:
+        source, name = convert(source, folder)  # CAD -> USD first, then Blender -> GLB
+        source = bake_material_inputs(source)
+        name += " + Blender"
+    elif extension not in USD | BLENDER:
+        raise ConversionError(f"{extension} files are not supported.")
+
+    output = folder / "model.glb"
+    command = [find_blender(), "-b", "--factory-startup", "--disable-autoexec"]
+    if extension == ".blend":
+        command.append(str(source))
+    command += ["--python", str(SERVER_DIR / "blender_export.py"), "--", str(source), str(output)]
+    run(command, "Blender")
+    if not output.exists():
+        raise ConversionError("Blender did not produce a GLB file.")
+    return output, name
+
+
 def main() -> None:
-    source, folder = Path(sys.argv[1]), Path(sys.argv[2])
+    glb = "--glb" in sys.argv
+    source, folder = (Path(a) for a in sys.argv[1:] if a != "--glb")
     try:
+        if glb:
+            output, converter = convert_glb(source, folder)
+            print(json.dumps({"ok": True, "glb": str(output), "converter": converter}))
+            return
         content, converter = convert(source, folder)
         layer, bounds = place(content, folder)
         print(json.dumps({"ok": True, "usd": str(layer), "bounds": bounds, "converter": converter}))

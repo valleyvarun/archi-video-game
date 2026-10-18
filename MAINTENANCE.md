@@ -11,10 +11,16 @@ There are **two separate parts**:
 | Part | Where it lives | Costs money? | Always on? |
 |---|---|---|---|
 | **The website** (`index.html`, `config.js`, …) | GitHub Pages: https://valleyvarun.github.io/archi-video-game/ | No | Yes |
-| **The Omniverse server** (renders the 3D, streams video) | Your Brev cloud GPU | **Yes, $2.25/hour while Running** | Only when you start it |
+| **The Omniverse server** (RTX viewer + file conversion) | Your Brev cloud GPU | **Yes, $2.25/hour while Running** | Only when you start it |
 
-The website only works while the Brev server is **running**. When the server is off,
-visitors see *"The Omniverse server is offline right now."* That is expected, not broken.
+The page offers two viewers:
+
+- **Web viewer** — works **without the server** for most files (glTF, OBJ, FBX, STL, PLY,
+  3MF, Collada, USD, Rhino, IFC, STEP, IGES): they are converted and rendered in the
+  visitor's browser. Revit, DWG, SolidWorks, Blender and similar files need the server for
+  conversion; while it's off, visitors get a tip such as "export IFC from Revit".
+- **Omniverse RTX viewer** — only works while the Brev server is **running**. When it's off,
+  visitors see *"The Omniverse server is offline right now."* That is expected, not broken.
 
 The website finds the server through **one address** stored in `config.js`, which looks like
 `https://some-words.trycloudflare.com`. **This address changes every time the server
@@ -206,7 +212,9 @@ Put these **before** `bash server/run.sh`, e.g. `SLOTS=6 bash server/run.sh`.
 
 | What you see | What to do |
 |---|---|
-| "The Omniverse server is offline right now." | Is Brev **Running**? Is `run.sh` running in tmux? Does `config.js` have the **current** address? Then reload with **Ctrl + Shift + R**. Also check your link doesn't end in an old `?server=…`. |
+| "The Omniverse server is offline right now." / "… needs the TwinDrop conversion server, which is offline" | Is Brev **Running**? Is `run.sh` running in tmux? Does `config.js` have the **current** address? Then reload with **Ctrl + Shift + R**. Also check your link doesn't end in an old `?server=…`. |
+| Web viewer: model looks incomplete, badge says "… not shown" | A Rhino file saved without render meshes; start the server (it completes them) or re-save in Rhino with a shaded viewport. |
+| Page is blank when opened from a file on your laptop | Serve it instead: `python -m http.server 5500`, then open `http://localhost:5500/`. |
 | "The GPU server is starting up." | The server is still loading (shaders). Wait for `Ready:` and click Try again. |
 | "All viewports are in use right now." | All 4 spots are taken. Wait, or use more `SLOTS` (and open more ports). |
 | Viewport connects but stays black | The video ports aren't open. Check **Cloud Firewall Ports** lists 47998–48001. |
@@ -228,10 +236,17 @@ Your laptop's RTX 3070 Ti can run the server too — only you can use it, but it
 ```powershell
 .\server\run.ps1
 ```
-Wait for `Ready:`, then double-click `index.html` and click **Launch viewport**.
+Wait for `Ready:`. Then serve the website folder (browsers won't run the page from a
+double-clicked file): open a second terminal in the project folder and run
+```powershell
+python -m http.server 5500
+```
+and open `http://localhost:5500/?server=http://localhost:8090` (the `?server=` part makes
+the page use your laptop instead of the cloud address in `config.js`). VS Code's Live Server
+extension works too.
 
-Note: the laptop's `config.js` points at the cloud address after you `git pull`; for laptop
-testing open `index.html?server=http://localhost:8090` instead.
+To try only the **web viewer** with in-browser formats, you don't need the GPU server at all:
+just the `python -m http.server 5500` step and `http://localhost:5500/`.
 
 ---
 

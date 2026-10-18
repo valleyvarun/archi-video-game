@@ -132,8 +132,114 @@ body {
   text-align: center;
 }
 
-.viewport-overlay[hidden] {
+.viewport-overlay[hidden],
+.web-view[hidden],
+.mode-picker[hidden],
+.mode-panel[hidden],
+.viewport-toolbar[hidden],
+.toolbar-button[hidden] {
   display: none;
+}
+
+/* Web viewer: three.js draws its canvas here, above the (unused) video. */
+.web-view {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.web-view canvas {
+  display: block;
+  cursor: grab;
+}
+
+.web-view canvas:active {
+  cursor: grabbing;
+}
+
+/* Landing: the two viewers, one below the other */
+.mode-picker,
+.mode-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: min(460px, 100%);
+}
+
+.mode-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 20px 22px;
+  color: #111111;
+  font: inherit;
+  text-align: left;
+  background: #fafafa;
+  border: 2px solid #d6d6d6;
+  border-radius: 0;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.mode-option:hover,
+.mode-option:focus-visible {
+  background: #f4f9ea;
+  border-color: #76b900;
+  outline: none;
+}
+
+.mode-name {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+
+.mode-detail {
+  color: #666666;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.link-button {
+  padding: 0;
+  color: #555555;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+/* While viewing: "New model" and "Download .glb" */
+.viewport-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  z-index: 3;
+  display: flex;
+  gap: 8px;
+}
+
+.toolbar-button {
+  height: 30px;
+  padding: 0 12px;
+  color: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  background: rgb(0 0 0 / 55%);
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.toolbar-button:hover {
+  background: rgb(0 0 0 / 75%);
 }
 
 /* Drag-and-drop area for a 3D file */
@@ -147,7 +253,7 @@ body {
   padding: 28px 20px;
   color: #333333;
   background: #fafafa;
-  border: 1.5px dashed #b8b8b8;
+  border: 3px dashed #76b900;
   cursor: pointer;
   transition:
     background-color 160ms ease,

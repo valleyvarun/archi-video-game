@@ -5,9 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0a0a0a" />
     <title>TwinDrop</title>
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+        }
+      }
+    </script>
     <script src="config.js" defer></script>
-    <script src="script.js" defer></script>
+    <script type="module" src="script.js"></script>
   </head>
   <body>
     <header class="site-header">
@@ -29,23 +38,45 @@
 
     <main class="site-body">
       <div class="viewport" id="viewport">
-        <!-- The Omniverse stream. tabindex lets it take keyboard focus for WASDQE. -->
+        <!-- Omniverse RTX viewer: the stream. tabindex lets it take keyboard focus for WASDQE. -->
         <video id="remote-video" tabindex="-1" autoplay playsinline muted></video>
         <audio id="remote-audio" muted></audio>
 
-        <div class="viewport-overlay" id="overlay">
-          <label class="dropzone" id="dropzone">
-            <input type="file" id="file-input" hidden />
-            <span class="dropzone-title" id="dropzone-title">Drop a 3D file here, or click to choose one</span>
-            <span class="dropzone-detail" id="dropzone-detail">Rhino · Revit · Blender · IFC · STEP · DWG · FBX · OBJ · glTF · USD and more</span>
-            <button class="dropzone-remove" id="file-remove" type="button" hidden>Remove file</button>
-          </label>
+        <!-- Web viewer: three.js draws into this. -->
+        <div class="web-view" id="web-view" hidden></div>
 
-          <p class="overlay-title">Omniverse viewport</p>
-          <p class="overlay-status" id="status" role="status" aria-live="polite">Rendered live on an NVIDIA RTX GPU and streamed to your browser.</p>
-          <button class="overlay-button" id="start" type="button">Launch viewport</button>
+        <div class="viewport-overlay" id="overlay">
+          <div class="mode-picker" id="mode-picker">
+            <p class="overlay-title">Choose a viewer</p>
+            <button class="mode-option" type="button" data-mode="web">
+              <span class="mode-name">Web viewer</span>
+              <span class="mode-detail">Renders in your browser with three.js. Works for everyone, and most files are converted on your own computer.</span>
+            </button>
+            <button class="mode-option" type="button" data-mode="omniverse">
+              <span class="mode-name">Omniverse RTX viewer</span>
+              <span class="mode-detail">Photoreal NVIDIA RTX rendering on a cloud GPU, streamed live. A few people at a time.</span>
+            </button>
+          </div>
+
+          <div class="mode-panel" id="mode-panel" hidden>
+            <label class="dropzone" id="dropzone">
+              <input type="file" id="file-input" hidden />
+              <span class="dropzone-title" id="dropzone-title">Drop a 3D file here, or click to choose one</span>
+              <span class="dropzone-detail" id="dropzone-detail">Rhino · Revit · Blender · IFC · STEP · DWG · FBX · OBJ · glTF · USD and more</span>
+              <button class="dropzone-remove" id="file-remove" type="button" hidden>Remove file</button>
+            </label>
+
+            <p class="overlay-title" id="mode-title"></p>
+            <p class="overlay-status" id="status" role="status" aria-live="polite"></p>
+            <button class="overlay-button" id="start" type="button">Launch viewport</button>
+            <button class="link-button" id="change-mode" type="button">Choose a different viewer</button>
+          </div>
         </div>
 
+        <div class="viewport-toolbar" id="toolbar" hidden>
+          <button class="toolbar-button" id="back" type="button">← New model</button>
+          <button class="toolbar-button" id="download" type="button" hidden>Download .glb</button>
+        </div>
         <p class="viewport-badge" id="badge" hidden></p>
         <p class="viewport-hint">WASD move · Q/E down/up · drag to look · Shift faster</p>
       </div>
