@@ -3,5 +3,5 @@
 // - Cloud (Brev):   the server's https:// address, e.g. 'https://your-instance.brevlab.com'
 // Override without editing this file by adding ?server=<address> to the page URL.
 window.TWINDROP_CONFIG = {
-  servers: ['https://queries-break-epinions-pierce.trycloudflare.com'],
+  servers: ['https://courts-future-moments-booth.trycloudflare.com'],
 };
