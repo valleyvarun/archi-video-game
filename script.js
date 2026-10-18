@@ -1,6 +1,7 @@
-// Connects the viewport to an Omniverse GPU server: claim a free viewer slot, load
-// NVIDIA's browser streaming client from that server, then play the WebRTC stream.
-// The 3D scene is rendered on the server; this page only shows video and forwards input.
+// Connects the viewport to an Omniverse GPU server: claim a free viewer slot, upload the
+// visitor's 3D file (the server converts it to USD and loads it), then play the WebRTC
+// stream. The 3D scene is rendered on the server; this page only shows video and
+// forwards keyboard and mouse input.
 
 const params = new URLSearchParams(window.location.search);
 const servers = params.has('server') ? params.get('server').split(',') : window.TWINDROP_CONFIG.servers;
@@ -10,9 +11,32 @@ const overlay = document.getElementById('overlay');
 const statusText = document.getElementById('status');
 const startButton = document.getElementById('start');
 const badge = document.getElementById('badge');
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('file-input');
+const dropzoneTitle = document.getElementById('dropzone-title');
+const dropzoneDetail = document.getElementById('dropzone-detail');
+const removeButton = document.getElementById('file-remove');
 
 const HIDDEN_DISCONNECT_MS = 60000; // free the slot if the tab stays hidden this long
+const MAX_UPLOAD_MB = 100;
+const DEFAULT_DETAIL = dropzoneDetail.textContent;
 
+// Keep in sync with server/formats.py. Values are the names shown while converting.
+const FORMATS = {
+  '.usd': 'USD', '.usda': 'USD', '.usdc': 'USD', '.usdz': 'USD',
+  '.blend': 'Blender', '.fbx': 'FBX', '.obj': 'OBJ', '.gltf': 'glTF', '.glb': 'glTF',
+  '.stl': 'STL', '.ply': 'PLY', '.abc': 'Alembic', '.dae': 'Collada',
+  '.3dm': 'Rhino', '.rvt': 'Revit', '.rfa': 'Revit', '.ifc': 'IFC',
+  '.dwg': 'AutoCAD', '.dxf': 'AutoCAD', '.dgn': 'MicroStation',
+  '.stp': 'STEP', '.step': 'STEP', '.igs': 'IGES', '.iges': 'IGES',
+  '.sat': 'ACIS', '.x_t': 'Parasolid', '.x_b': 'Parasolid', '.jt': 'JT', '.3mf': '3MF',
+  '.sldprt': 'SolidWorks', '.sldasm': 'SolidWorks', '.ipt': 'Inventor', '.iam': 'Inventor',
+  '.catpart': 'CATIA', '.catproduct': 'CATIA', '.3dxml': 'CATIA',
+  '.prt': 'CAD', '.nwd': 'Navisworks', '.zip': 'zipped',
+};
+fileInput.accept = Object.keys(FORMATS).join(',');
+
+let selectedFile = null;
 let streamer = null;
 let hiddenTimer = null;
 
@@ -27,14 +51,75 @@ if (window.crypto && !window.crypto.randomUUID) {
   };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const extensionOf = (name) => (name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+
+// ---------------------------------------------------------------------------------------
+// Choosing a file
+
+function selectFile(file) {
+  if (!file) return;
+  if (!FORMATS[extensionOf(file.name)]) {
+    dropzoneDetail.textContent = `${extensionOf(file.name) || 'That'} files aren't supported. ${DEFAULT_DETAIL}`;
+    return;
+  }
+  if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+    dropzoneDetail.textContent = `That file is larger than ${MAX_UPLOAD_MB} MB. Try a smaller or zipped file.`;
+    return;
+  }
+  selectedFile = file;
+  dropzone.classList.add('has-file');
+  dropzoneTitle.textContent = file.name;
+  dropzoneDetail.textContent = `${FORMATS[extensionOf(file.name)]} file · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
+  removeButton.hidden = false;
+}
+
+function clearFile() {
+  selectedFile = null;
+  fileInput.value = '';
+  dropzone.classList.remove('has-file');
+  dropzoneTitle.textContent = 'Drop a 3D file here, or click to choose one';
+  dropzoneDetail.textContent = DEFAULT_DETAIL;
+  removeButton.hidden = true;
+}
+
+fileInput.addEventListener('change', () => selectFile(fileInput.files[0]));
+removeButton.addEventListener('click', (event) => {
+  event.preventDefault();
+  clearFile();
+});
+dropzone.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  dropzone.classList.add('dragover');
+});
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', (event) => {
+  event.preventDefault();
+  dropzone.classList.remove('dragover');
+  selectFile(event.dataTransfer.files[0]);
+});
+
+// ---------------------------------------------------------------------------------------
+// Overlay states
+
 function showOverlay(message, buttonLabel) {
   overlay.hidden = false;
+  overlay.classList.remove('busy');
   badge.hidden = true;
   statusText.textContent = message;
   startButton.hidden = !buttonLabel;
   startButton.disabled = false;
   if (buttonLabel) startButton.textContent = buttonLabel;
 }
+
+function showProgress(message) {
+  overlay.classList.add('busy');
+  startButton.disabled = true;
+  statusText.textContent = message;
+}
+
+// ---------------------------------------------------------------------------------------
+// Talking to the GPU server
 
 // Ask each server for a free slot, in random order to spread viewers across GPUs.
 async function claimSlot() {
@@ -52,6 +137,56 @@ async function claimSlot() {
   return { error: reason };
 }
 
+function slotQuery(claim) {
+  return `slot=${claim.slot}&token=${encodeURIComponent(claim.token)}`;
+}
+
+function releaseSlot(claim) {
+  fetch(`${claim.base}/api/release?${slotQuery(claim)}`).catch(() => {});
+}
+
+// Upload with XMLHttpRequest because fetch() cannot report upload progress.
+function uploadFile(claim, file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${claim.base}/api/upload?${slotQuery(claim)}&name=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        showProgress(`Uploading ${file.name}… ${Math.round((event.loaded / event.total) * 100)}%`);
+      }
+    };
+    xhr.onload = () => {
+      let body = {};
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        // Not JSON (for example a proxy error page).
+      }
+      if (xhr.status < 300) resolve();
+      else reject(new Error(body.error || `Upload failed (error ${xhr.status}).`));
+    };
+    xhr.onerror = () => reject(new Error('Upload failed. Check your connection and try again.'));
+    xhr.send(file);
+  });
+}
+
+// Wait while the server converts the file to USD and loads it onto the GPU.
+async function waitForModel(claim, file) {
+  const kind = FORMATS[extensionOf(file.name)];
+  for (;;) {
+    const response = await fetch(`${claim.base}/api/job?${slotQuery(claim)}`, { cache: 'no-store' });
+    const job = await response.json();
+    if (job.state === 'ready') return;
+    if (job.state === 'error') throw new Error(job.message || 'The model could not be prepared.');
+    if (job.state === 'expired') throw new Error('The viewport reservation expired. Please try again.');
+    showProgress(job.state === 'loading'
+      ? 'Loading the model onto the GPU…'
+      : kind === 'USD' ? 'Preparing your USD file…' : `Converting your ${kind} file to USD…`);
+    await sleep(1000);
+  }
+}
+
 // NVIDIA's client library is served by the GPU server rather than committed to this site.
 function loadClient(base) {
   if (window.OVWebRTC) return Promise.resolve();
@@ -59,7 +194,7 @@ function loadClient(base) {
     const script = document.createElement('script');
     script.src = `${base}/vendor/ov-web-rtc.umd.js`;
     script.onload = resolve;
-    script.onerror = reject;
+    script.onerror = () => reject(new Error('Could not load the streaming client from the server.'));
     document.head.appendChild(script);
   });
 }
@@ -109,12 +244,11 @@ function disconnect(message) {
     streamer = null;
     current.terminate().catch(() => {});
   }
-  showOverlay(message, 'Reconnect');
+  showOverlay(message, 'Launch viewport');
 }
 
 async function start() {
-  startButton.disabled = true;
-  statusText.textContent = 'Finding a free viewport…';
+  showProgress('Finding a free viewport…');
 
   const claim = await claimSlot();
   if (claim.error === 'full') return showOverlay('All viewports are in use right now. Please try again in a minute.', 'Try again');
@@ -123,11 +257,17 @@ async function start() {
 
   try {
     await loadClient(claim.base);
-    statusText.textContent = 'Connecting to the GPU…';
+    if (selectedFile) {
+      showProgress(`Uploading ${selectedFile.name}…`);
+      await uploadFile(claim, selectedFile);
+      await waitForModel(claim, selectedFile);
+    }
+    showProgress('Connecting to the GPU…');
     await connect(claim);
   } catch (error) {
     console.error(error);
-    disconnect('Could not connect to the viewport. Please try again.');
+    releaseSlot(claim);
+    disconnect(error.message || 'Could not connect to the viewport. Please try again.');
   }
 }
 

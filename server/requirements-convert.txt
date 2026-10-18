@@ -1,0 +1,4 @@
+# File conversion runs in its own environment (server/.venv-convert), separate from the renderer.
+# usd-convert-cad (NVIDIA, built on HOOPS Exchange) needs Python 3.12.
+usd-convert-cad>=0.3,<0.4
+usd-core

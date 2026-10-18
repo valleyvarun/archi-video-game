@@ -34,6 +34,13 @@
         <audio id="remote-audio" muted></audio>
 
         <div class="viewport-overlay" id="overlay">
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="file-input" hidden />
+            <span class="dropzone-title" id="dropzone-title">Drop a 3D file here, or click to choose one</span>
+            <span class="dropzone-detail" id="dropzone-detail">Rhino · Revit · Blender · IFC · STEP · DWG · FBX · OBJ · glTF · USD and more</span>
+            <button class="dropzone-remove" id="file-remove" type="button" hidden>Remove file</button>
+          </label>
+
           <p class="overlay-title">Omniverse viewport</p>
           <p class="overlay-status" id="status" role="status" aria-live="polite">Rendered live on an NVIDIA RTX GPU and streamed to your browser.</p>
           <button class="overlay-button" id="start" type="button">Launch viewport</button>

@@ -136,6 +136,71 @@ body {
   display: none;
 }
 
+/* Drag-and-drop area for a 3D file */
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: min(460px, 100%);
+  margin-bottom: 16px;
+  padding: 28px 20px;
+  color: #333333;
+  background: #fafafa;
+  border: 1.5px dashed #b8b8b8;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.dropzone:hover,
+.dropzone.dragover {
+  background: #f4f9ea;
+  border-color: #76b900;
+}
+
+.dropzone.has-file {
+  background: #f4f9ea;
+  border-style: solid;
+  border-color: #76b900;
+}
+
+.dropzone-title {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  overflow-wrap: anywhere;
+}
+
+.dropzone-detail {
+  color: #777777;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.dropzone-remove {
+  margin-top: 4px;
+  padding: 0;
+  color: #555555;
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.dropzone-remove[hidden] {
+  display: none;
+}
+
+/* While uploading / converting / connecting, the file can't be changed. */
+.viewport-overlay.busy .dropzone {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
 .overlay-title {
   margin: 0;
   font-size: 20px;

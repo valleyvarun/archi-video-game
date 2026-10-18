@@ -1,4 +1,7 @@
 server/.venv/
+server/.venv-convert/
 server/vendor/
+server/tools/
+server/uploads/
 server/logs/
 __pycache__/

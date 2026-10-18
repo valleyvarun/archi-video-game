@@ -137,8 +137,11 @@ brev shell omniverse-realtime-viewer-launchable-7f59c1
 tmux attach -t twindrop        # then Ctrl + C to stop the server
 cd ~/archi-video-game
 git pull
+bash server/setup.sh           # only adds what's new; quick if nothing changed
 bash server/run.sh             # new address → update config.js again
 ```
+Running `setup.sh` again is always safe. It is **required** after updates that add new
+tools (like the file-upload update, which added the converters and Blender).
 
 Website-only changes (`index.html`, `styles.css`, `script.js`, `config.js`) don't need any of
 this — GitHub Pages updates by itself 1–2 minutes after you push.
@@ -149,9 +152,28 @@ project folder (VS Code: Source Control → "…" → Pull).
 
 ---
 
-## Showing your own USD model
+## Visitors' uploaded models
 
-Start the server with `--stage` and a USD file path or web address:
+Visitors drop a 3D file on the page and click **Launch viewport**. The server converts it to
+USD, loads it into that visitor's own viewport, and deletes it again when they leave.
+Nothing to maintain, but good to know:
+
+- **Formats:** Rhino, Revit, IFC, DWG, STEP, SolidWorks, … go through NVIDIA's CAD Converter;
+  Blender, FBX, OBJ, glTF, STL, … go through Blender; USD files load directly. Full list in
+  the README.
+- **Size limit:** 100 MB per file (Cloudflare's limit for the free tunnel).
+- **Textures:** formats that keep textures in separate files (`.gltf`, `.obj` + `.mtl`, USD with
+  textures) should be uploaded as one `.zip` with everything inside.
+- **Speed:** small files take a few seconds; a Revit house took ~15 s to convert. Two
+  conversions run at a time; others wait their turn.
+- **Where to look if one fails:** the tmux window shows a line like
+  `[slot 0] converted model.rvt in 14s: NVIDIA CAD Converter`, or the error. Uploaded files
+  live in `server/uploads/` while in use.
+
+## A base scene for everyone
+
+To show the same USD scene to every visitor (in addition to their own upload), start the
+server with `--stage` and a USD file path or web address:
 ```
 bash server/run.sh --stage https://omniverse-content-production.s3.us-west-2.amazonaws.com/Samples/Robot-OVRTX/robot-ovrtx.usda
 ```
@@ -189,6 +211,9 @@ Put these **before** `bash server/run.sh`, e.g. `SLOTS=6 bash server/run.sh`.
 | "All viewports are in use right now." | All 4 spots are taken. Wait, or use more `SLOTS` (and open more ports). |
 | Viewport connects but stays black | The video ports aren't open. Check **Cloud Firewall Ports** lists 47998–48001. |
 | Keys (WASD) do nothing | Click inside the viewport first. |
+| "… could not read this file" | The converter couldn't open it. Try another export format (IFC from Revit, STEP or .3dm from Rhino) or a `.zip`. |
+| "File conversion is not set up on the server" | Run `bash server/setup.sh` on the cloud machine, then restart `run.sh`. |
+| "Upload failed (error 413)" | File over 100 MB — zip it or export a lighter version. |
 | Works in Chrome/Edge, not another browser | Use Chrome or Edge; NVIDIA's streaming library is tested on those. |
 | `brev: command not found` (in Ubuntu) | Run `source ~/.bashrc`, or reopen Ubuntu. |
 | `brev shell` says not logged in | Run `brev login` (or `brev login --skip-browser`). |

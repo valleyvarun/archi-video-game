@@ -2,27 +2,43 @@
 
 TwinDrop — a web page with a live **NVIDIA Omniverse** USD viewport.
 
-The 3D scene is rendered on an NVIDIA RTX GPU by **ovrtx** (Omniverse RTX renderer) and
-streamed to the browser over WebRTC by **ovstream**. The browser only plays the video and
-sends your mouse and keyboard back, so the website itself is plain HTML/CSS/JS and can be
-hosted on GitHub Pages.
+Visitors drop a 3D file (Rhino, Revit, Blender, IFC, STEP, FBX, glTF, USD, …) on the page
+and click **Launch viewport**. The GPU server converts the file to USD, renders it with
+**ovrtx** (Omniverse RTX renderer) and streams it to the browser over WebRTC with
+**ovstream**. The browser only plays the video and sends mouse and keyboard back, so the
+website itself is plain HTML/CSS/JS on GitHub Pages.
 
 ```
 Visitors' browsers ── https ──> GitHub Pages  (index.html, styles.css, script.js, config.js)
         │
-        │ https / wss (control)            UDP (video)
-        ▼                                    ▲
+        │ https / wss (control, uploads)    UDP (video)
+        ▼                                     ▲
 GPU server (Brev cloud GPU, or your RTX PC for testing)
-   cloudflared tunnel → Caddy ─┬─ /api/*     → viewer.py: status + "claim a free viewer slot"
+   cloudflared tunnel → Caddy ─┬─ /api/*     → viewer.py: claim a slot, upload, conversion progress
                                ├─ /vendor/*  → viewer.py: NVIDIA's browser client library
                                └─ /slot/N/*  → WebRTC signaling for viewer N (port 49100 + N)
-   viewer.py: ovstage (USD scene) → ovrtx (RTX render) → ovstream (one WebRTC stream per viewer)
+   viewer.py (manager) ─┬─ convert.py: uploaded file → USD (NVIDIA CAD Converter or Blender)
+                        └─ slot.py × N: ovstage (scene) → ovrtx (RTX render) → ovstream (WebRTC)
 ```
 
 **Many people at once:** one ovstream stream can only serve one browser, so the server runs
-several **slots** (`SLOTS`, default 4 on the cloud). All slots share the same scene but each
-visitor gets their own camera and stream. For more visitors, run more GPU servers and list
-them all in `config.js`; the page picks one with a free slot.
+several **slots** (`SLOTS`, default 4 on the cloud), each its own process with its own scene,
+camera and stream — every visitor sees only their own model. For more visitors, run more GPU
+servers and list them all in `config.js`; the page picks one with a free slot.
+
+## Supported 3D files
+
+| Converted by | File types |
+|---|---|
+| Nothing needed (already USD) | `.usd` `.usda` `.usdc` `.usdz` |
+| **NVIDIA CAD Converter** (`usd-convert-cad`, built on HOOPS Exchange) | Rhino `.3dm` · Revit `.rvt` `.rfa` · IFC `.ifc` · AutoCAD `.dwg` `.dxf` · MicroStation `.dgn` · STEP `.stp` `.step` · IGES `.igs` `.iges` · ACIS `.sat` · Parasolid `.x_t` `.x_b` · JT `.jt` · 3MF `.3mf` · SolidWorks `.sldprt` `.sldasm` · Inventor `.ipt` `.iam` · CATIA `.catpart` `.catproduct` `.3dxml` · NX/Creo `.prt` · Navisworks `.nwd` |
+| **Blender 4.5** (headless) | Blender `.blend` · FBX `.fbx` · OBJ `.obj` · glTF `.gltf` `.glb` · STL `.stl` · PLY `.ply` · Alembic `.abc` · Collada `.dae` |
+| Unzipped first | `.zip` holding one of the above plus its textures (e.g. `.gltf` + `.bin` + images, `.obj` + `.mtl`, USD + textures) |
+
+Tested end to end: `.3dm` (incl. blocks), `.rvt`, `.ifc`, `.stp`, `.blend`, `.fbx`, `.obj`,
+`.glb`, `.usdz`, and a zipped `.gltf`. Uploads are limited to 100 MB (Cloudflare's limit).
+Models are turned Z-up and into metres; models far from the origin are centred on the grid.
+Lights and cameras inside uploaded files are ignored in favour of the viewer's own.
 
 ## Controls
 
@@ -35,10 +51,15 @@ view · hold Shift to move faster. Click into the viewport first so it receives 
 |---|---|
 | `index.html`, `styles.css`, `script.js` | The website |
 | `config.js` | Which GPU server(s) the website connects to |
-| `server/viewer.py` | The Omniverse server: render loop, viewer slots, small HTTP API |
-| `server/scene.py` | The viewer's USD layer: cameras, XY grid, XYZ axes, white sky light |
+| `server/viewer.py` | The manager: starts the slots, HTTP API, uploads, conversion jobs |
+| `server/slot.py` | One viewer slot: its own scene, RTX renderer and WebRTC stream |
+| `server/convert.py` | Uploaded file → USD, placed upright and in metres (runs in `.venv-convert`) |
+| `server/blender_export.py` | Runs inside Blender to export USD |
+| `server/formats.py` | Which file types go to which converter |
+| `server/scene.py` | The viewer's USD layer: camera, XY grid, XYZ axes, white sky light |
 | `server/fly_camera.py` | WASDQE fly camera |
 | `server/fetch_client.py` | Downloads NVIDIA's browser client into `server/vendor/` |
+| `server/requirements.txt`, `server/requirements-convert.txt` | Renderer and converter Python packages |
 | `server/setup.sh`, `server/run.sh` | Install / start on a Linux cloud GPU (Brev) |
 | `server/setup.ps1`, `server/run.ps1` | Install / start on a Windows PC with an RTX GPU |
 | `deploy/Caddyfile` | Routes the public https traffic on the GPU server |
@@ -51,7 +72,7 @@ committed here; each GPU server downloads it from NVIDIA's registry and serves i
 ## 1. Run it on your own PC (Windows + NVIDIA RTX GPU)
 
 ```powershell
-.\server\setup.ps1      # once: Python env + ovrtx/ovstage/ovstream (a few GB)
+.\server\setup.ps1      # once: renderer + converters + Blender (several GB)
 .\server\run.ps1        # start; the very first start compiles shaders (a few minutes)
 ```
 
@@ -121,7 +142,7 @@ When the GPU server is off, visitors see "The Omniverse server is offline right 
 ## How many people can use it?
 
 - Each GPU server serves `SLOTS` people at the same time (default 4, set with
-  `SLOTS=6 bash server/run.sh`). Everyone sees the same scene with their own camera.
+  `SLOTS=6 bash server/run.sh`). Each visitor gets their own scene, model and camera.
   More slots share the same GPU, so each viewer's frame rate drops as slots fill up.
 - Visitor number 5 sees "All viewports are in use right now" and can retry. Slots free
   themselves when a visitor closes the page, leaves the tab in the background for a minute,
@@ -140,4 +161,7 @@ When the GPU server is off, visitors see "The Omniverse server is offline right 
 | "The GPU server is starting up" | First start is compiling shaders; wait for `Ready:` in the server log. |
 | Viewport connects but stays black (cloud) | UDP ports 47998+ not open to the instance, or wrong public IP. |
 | Keys do nothing | Click inside the viewport so the video has focus. |
+| "… could not read this file" | The converter rejected it. Try exporting another format (e.g. IFC from Revit, STEP or `.3dm` from Rhino) or a `.zip` with its textures. |
+| Model without textures | Separate texture files were not uploaded: zip the model together with its textures. |
+| "Upload failed (error 413)" | File is over 100 MB. Zip it, or export a lighter version. |
 | Server log | `server/logs/viewer.log` (and `server/logs/tunnel.log`). |

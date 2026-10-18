@@ -1,48 +1,53 @@
-"""TwinDrop Omniverse viewer server.
+"""TwinDrop Omniverse server.
 
-ovstage owns the USD scene, ovrtx renders it on the GPU, and ovstream streams it to
-browsers over WebRTC. One ovstream server can only stream to one browser, so the
-viewer runs several "slots": each slot has its own camera, RenderProduct and
-WebRTC server, and only slots with a connected viewer are rendered.
+Starts one slot process (slot.py) per simultaneous viewer, converts uploaded 3D files to
+USD (convert.py), and serves a small HTTP API (default 127.0.0.1:8090) for the web page:
 
-A small HTTP API (default 127.0.0.1:8090) lets the web page find a free slot:
-    GET /api/status   -> readiness and which slots are busy
-    GET /api/claim    -> reserve a free slot for the caller
-    GET /vendor/ov-web-rtc.umd.js -> NVIDIA's browser client (see fetch_client.py)
+    GET  /api/status                         readiness and which slots are busy
+    GET  /api/claim                          reserve a free slot -> {slot, token, signal_port, ...}
+    POST /api/upload?slot=&token=&name=      upload a 3D file into the claimed slot (body = file)
+    GET  /api/job?slot=&token=               that upload's progress: converting/loading/ready/error
+    GET  /api/release?slot=&token=           give a claimed slot back (e.g. after an error)
+    GET  /vendor/ov-web-rtc.umd.js           NVIDIA's browser client (see fetch_client.py)
 
 Usage:
-    python viewer.py                          # local test, 2 slots
-    python viewer.py --stage path/or/url.usd  # also show a USD scene
-    python viewer.py --slots 4 --public-ip 1.2.3.4   # cloud GPU
+    python viewer.py                                   # local test, 2 slots
+    python viewer.py --slots 4 --public-ip 1.2.3.4     # cloud GPU
 """
 
 import argparse
 import json
 import os
+import re
+import secrets
+import shutil
+import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
-os.environ.setdefault("OVRTX_SKIP_USD_CHECK", "1")
+from formats import SUPPORTED
 
-import numpy as np
-import ovrtx
-import ovstage
-import ovstream
-import ovstream_utils
+SERVER_DIR = Path(__file__).resolve().parent
+CLIENT_LIBRARY = SERVER_DIR / "vendor" / "ov-web-rtc.umd.js"
+UPLOADS = SERVER_DIR / "uploads"
+CLAIM_SECONDS = 60          # a claimed slot is held this long without the browser checking in
+CONVERSIONS = threading.Semaphore(2)  # conversions are CPU-heavy; run at most two at once
 
-from fly_camera import FlyCamera
-from scene import build_root_layer, camera_path, product_path
 
-CLIENT_LIBRARY = Path(__file__).with_name("vendor") / "ov-web-rtc.umd.js"
-CLAIM_SECONDS = 30  # how long a claimed slot is held for the browser to connect
+def converter_python() -> str:
+    for relative in (".venv-convert/Scripts/python.exe", ".venv-convert/bin/python"):
+        if (SERVER_DIR / relative).exists():
+            return str(SERVER_DIR / relative)
+    return ""
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stage", help="USD file path or URL to show (optional)")
+    parser.add_argument("--stage", help="base USD scene shown to every visitor (optional)")
     parser.add_argument("--slots", type=int, default=2, help="max simultaneous viewers (default 2)")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
@@ -53,142 +58,261 @@ def parse_args():
     parser.add_argument("--http-host", default="127.0.0.1")
     parser.add_argument("--http-port", type=int, default=8090)
     parser.add_argument("--idle-minutes", type=float, default=10, help="disconnect viewers idle this long")
+    parser.add_argument("--max-upload-mb", type=int, default=100)
     parser.add_argument("--no-sky", action="store_true", help="do not add the white sky light")
     return parser.parse_args()
 
 
 class Slot:
-    """One viewer: a camera, a RenderProduct and a WebRTC server."""
+    """Manager-side view of one slot process."""
 
     def __init__(self, index: int, args):
         self.index = index
-        self.camera = FlyCamera()
-        self.product = product_path(index)
-        self.bgra_var = self.product + "/BgraColor"
+        self.args = args
         self.signal_port = args.signal_port + index
-        self.config = ovstream.ServerConfig(
-            width=args.width,
-            height=args.height,
-            cuda_device=0,
-            webrtc_signal_port=self.signal_port,
-            # Each WebRTC server needs its own media port when a public IP is pinned.
-            stream_port=args.media_port + index,
-        )
-        if args.public_ip:
-            self.config.webrtc_public_ip = args.public_ip
+        self.state = "starting"      # reported by slot.py: starting/idle/loading/ready/error
         self.connected = False
+        self.token = None            # set while a browser has claimed this slot
         self.claimed_until = 0.0
-        self.last_input = 0.0
-        self.server = ovstream.Server(ovstream.ServerType.WEBRTC)
-        self.server.on_connection = self._on_connection
-        self.server.on_input = self._on_input
-
-    def _on_connection(self, connected: bool) -> None:
-        if connected:
-            self.camera.reset()
-            self.claimed_until = 0.0
-            self.last_input = time.monotonic()
-        self.connected = connected
-        print(f"[slot {self.index}] viewer {'connected' if connected else 'disconnected'}", flush=True)
-
-    def _on_input(self, event) -> None:
-        self.last_input = time.monotonic()
-        self.camera.handle_input(event)
+        self.job = None              # {"state": converting/loading/ready/error, "message": ...}
+        self.job_dir = None
+        self.stale_dirs = []         # upload folders to delete once the slot is idle again
+        self.process = None
 
     @property
-    def busy(self) -> bool:
-        return self.connected or time.monotonic() < self.claimed_until
+    def free(self) -> bool:
+        return self.state == "idle" and not self.connected and self.token is None
 
     def start(self) -> None:
-        self.server.start(self.config)
+        args = self.args
+        command = [sys.executable, "-u", str(SERVER_DIR / "slot.py"), "--index", str(self.index),
+                   "--width", str(args.width), "--height", str(args.height), "--fps", str(args.fps),
+                   "--signal-port", str(self.signal_port), "--media-port", str(args.media_port + self.index),
+                   "--idle-minutes", str(args.idle_minutes)]
+        if args.public_ip:
+            command += ["--public-ip", args.public_ip]
+        if args.stage:
+            command += ["--stage", args.stage]
+        if args.no_sky:
+            command.append("--no-sky")
+        env = dict(os.environ, OVRTX_SKIP_USD_CHECK="1", PYTHONIOENCODING="utf-8")
+        self.state = "starting"
+        self.process = subprocess.Popen(command, cwd=SERVER_DIR, env=env, text=True, encoding="utf-8",
+                                        errors="replace", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT)
+        threading.Thread(target=self._read_output, daemon=True).start()
 
-    def restart(self) -> None:
-        """Drop the current viewer so the slot frees up."""
-        self.server.stop()
-        self.connected = False
-        self.server.start(self.config)
-
-    def close(self) -> None:
+    def send(self, **command) -> None:
         try:
-            self.server.stop()
-        except ovstream.OvstreamError:
+            self.process.stdin.write(json.dumps(command) + "\n")
+            self.process.stdin.flush()
+        except (OSError, AttributeError):
             pass
-        self.server.close()
+
+    def _read_output(self) -> None:
+        for line in self.process.stdout:
+            # Native libraries sometimes leave partial output (colour codes) before an event.
+            marker = line.find("@@{")
+            if marker >= 0:
+                self._on_event(json.loads(line[marker + 2:]))
+            elif line.strip():
+                print(f"[slot {self.index}] {line.rstrip()}", flush=True)
+        if not stopping.is_set():
+            print(f"[slot {self.index}] process exited; restarting", flush=True)
+            self.state, self.connected, self.token, self.job = "starting", False, None, None
+            time.sleep(3)
+            self.start()
+
+    def _on_event(self, event: dict) -> None:
+        if "connected" in event:
+            self.connected = event["connected"]
+            print(f"[slot {self.index}] viewer {'connected' if self.connected else 'disconnected'}", flush=True)
+            if self.connected:
+                self.token, self.claimed_until = None, 0.0
+            else:
+                self.release(reset=False)  # slot.py resets its own scene on disconnect
+        if "error" in event and self.job:
+            self.job = {"state": "error", "message": event["error"]}
+        if "state" in event:
+            self.state = event["state"]
+            if self.job and self.state in ("loading", "ready"):
+                self.job = {"state": self.state, "message": ""}
+            if self.state == "idle":
+                for folder in self.stale_dirs:
+                    shutil.rmtree(folder, ignore_errors=True)
+                self.stale_dirs.clear()
+
+    def release(self, reset: bool = True) -> None:
+        """Forget the claim and its upload; clear the visitor's model from the scene."""
+        self.token, self.claimed_until, self.job = None, 0.0, None
+        if self.job_dir:
+            self.stale_dirs.append(self.job_dir)
+            self.job_dir = None
+        if reset:
+            self.send(cmd="reset")
 
 
-class CameraWriter:
-    """Publishes a camera's transform to ovstage as `omni:xform`."""
-
-    def __init__(self, stage, prim_path: str):
-        self._stage = stage
-        self._paths = ovstage.PathDictionary(stage)
-        self._path_list = self._paths.create_path_list_from_strings([prim_path])
-        self._query = stage.query_from_path_list(self._path_list)
-        self._attribute = self._paths.intern_token("omni:xform")
-        self._dtype = ovstage.numpy_to_dldatatype(np.dtype(np.float64), lanes=16)
-
-    def write(self, matrix: np.ndarray, ordinal: int) -> None:
-        tensor = ovstage.make_dltensor(matrix.reshape(1, 4, 4), dtype=self._dtype, shape=[1], ndim=1)
-        self._stage.write_attribute(self._query, self._attribute, ordinal=ordinal,
-                                    tensors=tensor, is_array=False).wait()
-
-    def release(self) -> None:
-        self._query.release().wait()
-        self._paths.destroy_path_list(self._path_list)
-        self._paths.destroy()
-
-
-class Api:
-    """Tiny HTTP API so the web page can find a free slot."""
-
-    def __init__(self, slots, args):
-        self.slots = slots
+class Manager:
+    def __init__(self, args):
         self.args = args
-        self.ready = False
+        self.slots = [Slot(i, args) for i in range(args.slots)]
         self.lock = threading.Lock()
 
+    def start_slots(self) -> None:
+        # Start one slot first so it compiles and caches shaders; the rest then start quickly.
+        first, *rest = self.slots
+        first.start()
+        while first.state == "starting" and not stopping.is_set():
+            time.sleep(1)
+        for slot in rest:
+            slot.start()
+
+    def housekeeping(self) -> None:
+        while not stopping.wait(2):
+            now = time.monotonic()
+            with self.lock:
+                for slot in self.slots:
+                    if slot.token and not slot.connected and now > slot.claimed_until:
+                        print(f"[slot {slot.index}] claim expired", flush=True)
+                        slot.release()
+
+    def find(self, query: dict):
+        """The slot named in the query, if the token matches its current claim."""
+        try:
+            slot = self.slots[int(query.get("slot", ["-1"])[0])]
+        except (ValueError, IndexError):
+            return None
+        token = query.get("token", [""])[0]
+        return slot if token and token == slot.token else None
+
+    # -- API ---------------------------------------------------------------------------------
     def status(self) -> dict:
         return {
-            "ready": self.ready,
+            "ready": any(slot.state != "starting" for slot in self.slots),
             "width": self.args.width,
             "height": self.args.height,
-            "slots": [{"id": s.index, "busy": s.busy, "signal_port": s.signal_port} for s in self.slots],
+            "slots": [{"id": s.index, "busy": not s.free, "signal_port": s.signal_port} for s in self.slots],
         }
 
     def claim(self):
-        if not self.ready:
-            return 503, {"error": "warming_up"}
         with self.lock:
             for slot in self.slots:
-                if not slot.busy:
+                if slot.free:
+                    slot.token = secrets.token_urlsafe(12)
                     slot.claimed_until = time.monotonic() + CLAIM_SECONDS
-                    return 200, {"slot": slot.index, "signal_port": slot.signal_port,
+                    return 200, {"slot": slot.index, "token": slot.token, "signal_port": slot.signal_port,
                                  "width": self.args.width, "height": self.args.height}
+        if not any(slot.state != "starting" for slot in self.slots):
+            return 503, {"error": "warming_up"}
         return 503, {"error": "full"}
 
+    def upload(self, query: dict, length: int, body) -> tuple:
+        slot = self.find(query)
+        if slot is None:
+            return 403, {"error": "This viewport reservation has expired. Please try again."}
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(query.get("name", ["model"])[0]).name)[-100:]
+        if Path(name).suffix.lower() not in SUPPORTED:
+            return 400, {"error": f"{Path(name).suffix or 'This'} files are not supported."}
+        if length > self.args.max_upload_mb * 1024 * 1024:
+            return 413, {"error": f"Files up to {self.args.max_upload_mb} MB are supported."}
+        if not converter_python():
+            return 500, {"error": "File conversion is not set up on the server."}
+
+        folder = UPLOADS / f"slot{slot.index}" / slot.token
+        folder.mkdir(parents=True, exist_ok=True)
+        slot.job_dir = folder
+        slot.claimed_until = time.monotonic() + 3600  # hold the slot while a slow upload arrives
+        path = folder / name
+        with open(path, "wb") as out:
+            remaining = length
+            while remaining > 0:
+                chunk = body.read(min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                out.write(chunk)
+                remaining -= len(chunk)
+        if remaining > 0:
+            slot.claimed_until = time.monotonic() + CLAIM_SECONDS
+            return 400, {"error": "The upload was interrupted. Please try again."}
+        slot.job = {"state": "converting", "message": ""}
+        slot.claimed_until = time.monotonic() + CLAIM_SECONDS
+        threading.Thread(target=self.convert, args=(slot, slot.token, path), daemon=True).start()
+        return 202, {"ok": True}
+
+    def convert(self, slot: Slot, token: str, path: Path) -> None:
+        with CONVERSIONS:
+            started = time.monotonic()
+            result = subprocess.run([converter_python(), str(SERVER_DIR / "convert.py"), str(path), str(path.parent)],
+                                    cwd=SERVER_DIR, capture_output=True, text=True, errors="replace")
+        lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+        outcome = json.loads(lines[-1]) if lines else {"ok": False, "error": "Conversion failed."}
+        print(f"[slot {slot.index}] converted {path.name} in {time.monotonic() - started:.0f}s: "
+              f"{outcome.get('converter') or outcome.get('error')}", flush=True)
+        if slot.token != token:
+            return  # the visitor gave up while we were converting
+        if outcome["ok"]:
+            slot.job = {"state": "loading", "message": ""}
+            slot.send(cmd="load", usd=outcome["usd"], bounds=outcome["bounds"])
+        else:
+            slot.job = {"state": "error", "message": outcome["error"]}
+
+    def job(self, query: dict):
+        slot = self.find(query)
+        if slot is None:
+            return 404, {"state": "expired"}
+        slot.claimed_until = time.monotonic() + CLAIM_SECONDS  # the browser is still waiting
+        return 200, slot.job or {"state": "none"}
+
+    def release(self, query: dict):
+        slot = self.find(query)
+        if slot is not None and not slot.connected:
+            with self.lock:
+                slot.release()
+        return 200, {"ok": True}
+
     def serve(self) -> ThreadingHTTPServer:
-        api = self
+        manager = self
 
         class Handler(BaseHTTPRequestHandler):
-            def _send(self, code, body: bytes, content_type: str):
+            def _headers(self, code: int, content_type: str) -> None:
                 self.send_response(code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(body)
+
+            def _json(self, code: int, body: dict) -> None:
+                self._headers(code, "application/json")
+                self.wfile.write(json.dumps(body).encode())
+
+            def do_OPTIONS(self):
+                self._headers(204, "text/plain")
 
             def do_GET(self):
-                path = self.path.split("?")[0]
-                if path == "/api/status":
-                    self._send(200, json.dumps(api.status()).encode(), "application/json")
-                elif path == "/api/claim":
-                    code, body = api.claim()
-                    self._send(code, json.dumps(body).encode(), "application/json")
-                elif path == "/vendor/ov-web-rtc.umd.js" and CLIENT_LIBRARY.exists():
-                    self._send(200, CLIENT_LIBRARY.read_bytes(), "text/javascript")
+                url = urlparse(self.path)
+                query = parse_qs(url.query)
+                if url.path == "/api/status":
+                    self._json(200, manager.status())
+                elif url.path == "/api/claim":
+                    self._json(*manager.claim())
+                elif url.path == "/api/job":
+                    self._json(*manager.job(query))
+                elif url.path == "/api/release":
+                    self._json(*manager.release(query))
+                elif url.path == "/vendor/ov-web-rtc.umd.js" and CLIENT_LIBRARY.exists():
+                    self._headers(200, "text/javascript")
+                    self.wfile.write(CLIENT_LIBRARY.read_bytes())
                 else:
-                    self._send(404, b"not found", "text/plain")
+                    self._json(404, {"error": "not found"})
+
+            def do_POST(self):
+                url = urlparse(self.path)
+                if url.path != "/api/upload":
+                    return self._json(404, {"error": "not found"})
+                length = int(self.headers.get("Content-Length") or 0)
+                self._json(*manager.upload(parse_qs(url.query), length, self.rfile))
 
             def log_message(self, *args):
                 pass
@@ -198,109 +322,38 @@ class Api:
         return httpd
 
 
+stopping = threading.Event()
+
+
 def main():
     args = parse_args()
     if not CLIENT_LIBRARY.exists():
         print("Browser client missing: run `python fetch_client.py` first.", file=sys.stderr)
+    if not converter_python():
+        print("Converter environment missing (server/.venv-convert): uploads are disabled.", file=sys.stderr)
 
-    ovstream.initialize()
-    slots = [Slot(i, args) for i in range(args.slots)]
-    api = Api(slots, args)
-    httpd = api.serve()
+    manager = Manager(args)
+    httpd = manager.serve()
     print(f"API on http://{args.http_host}:{args.http_port}/api/status", flush=True)
+    print("Starting the renderer (the first run compiles shaders and can take several minutes)...", flush=True)
+    threading.Thread(target=manager.start_slots, daemon=True).start()
+    threading.Thread(target=manager.housekeeping, daemon=True).start()
 
-    renderer = stage = None
-    writers = []
+    announced = False
     try:
-        # The stage is created before the renderer, then the renderer is attached to it.
-        stage = ovstage.Stage("twindrop")
-        print("Creating ovrtx renderer (the first run compiles shaders and can take several minutes)...", flush=True)
-        renderer = ovrtx.Renderer()
-        renderer.attach_ovstage(stage)
-
-        print(f"Loading scene: {args.stage or '(grid only)'}", flush=True)
-        ordinal = 1
-        root_layer = build_root_layer(args.stage, args.slots, args.width, args.height, sky=not args.no_sky)
-        ovstage.population.open_usd_from_string(stage, root_layer, ordinal=ordinal)
-        stage.advance_write_floor(ordinal, ovstage.Scope.ALL).wait()
-        writers = [CameraWriter(stage, camera_path(s.index)) for s in slots]
-
-        # Warm up: render every slot once so shaders compile before anyone connects.
-        ordinal += 1
-        for slot, writer in zip(slots, writers):
-            writer.write(slot.camera.update(0.0), ordinal)
-        stage.advance_write_floor(ordinal, ovstage.Scope.ALL).wait()
-        all_products = {s.product for s in slots}
-        for _ in range(20):
-            products = renderer.step(render_products=all_products, delta_time=1 / args.fps, ordinal=ordinal)
-            if all_products <= set(products.keys()):
-                break
-        else:
-            raise RuntimeError("RenderProducts did not become available")
-        del products
-
-        for slot in slots:
-            slot.start()
-            print(f"[slot {slot.index}] WebRTC signaling on port {slot.signal_port}", flush=True)
-        api.ready = True
-        print(f"Ready: {args.slots} viewer slot(s), {args.width}x{args.height}. Press Ctrl+C to stop.", flush=True)
-
-        idle_seconds = args.idle_minutes * 60
-        with ovstream_utils.Loop(ovstream_utils.LoopConfig(fps_target=args.fps)) as loop:
-            while True:
-                tick = loop.tick()
-                active = [s for s in slots if s.connected]
-                if not active:
-                    continue
-
-                dt = tick.delta_time_seconds or 1 / args.fps
-                ordinal += 1
-                for slot in active:
-                    writers[slot.index].write(slot.camera.update(dt), ordinal)
-                stage.advance_write_floor(ordinal, ovstage.Scope.ALL).wait()
-
-                products = renderer.step(render_products={s.product for s in active},
-                                         delta_time=dt, ordinal=ordinal)
-                rendered = set(products.keys())
-                for slot in active:
-                    if slot.product not in rendered:
-                        continue
-                    for frame in products[slot.product].frames:
-                        mapping = frame.render_vars[slot.bgra_var].map(device=ovrtx.Device.CUDA)
-                        try:
-                            slot.server.stream_video(ovstream.VideoFrame(
-                                buffer=int(mapping.data),
-                                width=args.width,
-                                height=args.height,
-                                pitch_bytes=args.width * 4,
-                                sync=ovstream.CudaSync(wait_event=int(mapping.wait_event or 0)),
-                            ))
-                        except ovstream.OvstreamError:
-                            pass  # viewer disconnected mid-frame
-                        finally:
-                            mapping.unmap()
-                del products
-
-                now = time.monotonic()
-                for slot in active:
-                    if now - slot.last_input > idle_seconds:
-                        print(f"[slot {slot.index}] idle for {args.idle_minutes:g} min, disconnecting", flush=True)
-                        slot.restart()
+        while True:
+            time.sleep(1)
+            if not announced and all(slot.state != "starting" for slot in manager.slots):
+                announced = True
+                print(f"Ready: {args.slots} viewer slot(s), {args.width}x{args.height}. Press Ctrl+C to stop.", flush=True)
     except KeyboardInterrupt:
         pass
     finally:
+        stopping.set()
         httpd.shutdown()
-        for slot in slots:
-            slot.close()
-        for writer in writers:
-            writer.release()
-        if renderer is not None and stage is not None:
-            renderer.detach_ovstage()
-        if stage is not None:
-            stage.destroy()
-        if renderer is not None:
-            renderer.destroy()
-        ovstream.shutdown()
+        for slot in manager.slots:
+            if slot.process:
+                slot.process.terminate()
 
 
 if __name__ == "__main__":

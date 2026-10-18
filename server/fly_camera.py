@@ -10,10 +10,9 @@ import threading
 import numpy as np
 import ovstream
 
-SPEED = 5.0           # metres per second
 FAST_MULTIPLIER = 3.0
 LOOK_GAIN = 0.004     # radians per pixel of drag
-WHEEL_STEP = 1.0      # metres per wheel notch
+WHEEL_SECONDS = 0.2   # one wheel notch moves as far as 0.2 s of walking
 PITCH_LIMIT = 1.55
 
 # ovstream key codes are uppercase ASCII for letters; Shift is 0x0301-0x0303.
@@ -23,11 +22,25 @@ WORLD_UP = np.array([0.0, 0.0, 1.0])
 
 
 class FlyCamera:
-    def __init__(self, eye=(10.0, -10.0, 8.0), target=(0.0, 0.0, 0.0)):
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.set_home((10.0, -10.0, 8.0), (0.0, 0.0, 0.0), speed=5.0)
+
+    def set_home(self, eye, target, speed: float):
+        """Where reset() puts the camera, and how fast it moves (metres per second)."""
         self._home_eye = np.array(eye, dtype=np.float64)
         self._home_target = np.array(target, dtype=np.float64)
-        self._lock = threading.Lock()
+        self.speed = speed
         self.reset()
+
+    def frame(self, bounds):
+        """Set home to look at a box [minx, miny, minz, maxx, maxy, maxz] from the front-right, above."""
+        lo, hi = np.array(bounds[:3]), np.array(bounds[3:])
+        center = (lo + hi) / 2
+        radius = max(np.linalg.norm(hi - lo) / 2, 0.01)
+        direction = np.array([1.0, -1.0, 0.7]) / np.linalg.norm([1.0, -1.0, 0.7])
+        # The vertical field of view is about 36 degrees; this distance fits the box in view.
+        self.set_home(center + direction * radius * 3.3, center, speed=max(radius * 0.5, 0.05))
 
     def reset(self):
         with self._lock:
@@ -75,14 +88,14 @@ class FlyCamera:
             flat_forward = np.array([math.cos(self.yaw), math.sin(self.yaw), 0.0])
             flat_right = np.array([math.sin(self.yaw), -math.cos(self.yaw), 0.0])
 
-            step = SPEED * dt * (FAST_MULTIPLIER if self.keys & SHIFT_KEYS else 1.0)
+            step = self.speed * dt * (FAST_MULTIPLIER if self.keys & SHIFT_KEYS else 1.0)
             if KEY_W in self.keys: self.eye += flat_forward * step
             if KEY_S in self.keys: self.eye -= flat_forward * step
             if KEY_D in self.keys: self.eye += flat_right * step
             if KEY_A in self.keys: self.eye -= flat_right * step
             if KEY_E in self.keys: self.eye[2] += step
             if KEY_Q in self.keys: self.eye[2] -= step
-            self.eye += forward * self.pending_wheel * WHEEL_STEP
+            self.eye += forward * self.pending_wheel * self.speed * WHEEL_SECONDS
             self.pending_wheel = 0.0
 
             right = np.cross(forward, WORLD_UP)

@@ -1,26 +1,22 @@
 """Builds the viewer's root USD layer.
 
-The root layer sublayers the user's scene (never modified) and adds everything the
-viewer owns: one camera + RenderProduct per viewer slot, a grid on the XY plane,
-X/Y/Z axes, and a white sky light so the scene is visible without its own lights.
+The root layer adds everything the viewer owns: the camera and its RenderProduct, a grid
+on the XY plane, X/Y/Z axes, and a white sky light so scenes are visible without their
+own lights. A visitor's uploaded model is added later as a reference at MODEL_PATH.
+An optional base scene (--stage) is sublayered and never modified.
 """
 
-CAMERA_PATH = "/Viewer/Cameras/Camera{index}"
-PRODUCT_PATH = "/Render/Slot{index}"
+CAMERA_PATH = "/Viewer/Camera"
+PRODUCT_PATH = "/Render/Viewport"
+BGRA_VAR = PRODUCT_PATH + "/BgraColor"
+HELPERS_PATH = "/Viewer/Helpers"   # grid + axes; scaled to suit the model's size
+MODEL_PATH = "/Upload"
 
-GRID_HALF_SIZE = 10      # grid spans -10..10 m
+GRID_HALF_SIZE = 10      # grid spans -10..10 (before scaling)
 GRID_LINE_WIDTH = 0.015
 GRID_HEIGHT = 0.002      # lift slightly above z=0 so it does not fight a ground plane
 AXIS_LENGTH = 5.0
-AXIS_THICKNESS = 0.03
-
-
-def camera_path(index: int) -> str:
-    return CAMERA_PATH.format(index=index)
-
-
-def product_path(index: int) -> str:
-    return PRODUCT_PATH.format(index=index)
+AXIS_THICKNESS = 0.015
 
 
 def _floats(values) -> str:
@@ -86,25 +82,47 @@ def _axes() -> str:
     )
 
 
-def _camera(index: int, aspect: float) -> str:
+def build_root_layer(scene: str | None, width: int, height: int, sky: bool = True) -> str:
+    sublayers = f"\n    subLayers = [@{scene.replace(chr(92), '/')}@]" if scene else ""
+    sky_light = """
+    def DomeLight "Sky"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 1200
+    }""" if sky else ""
     horizontal_aperture = 20.955
-    return f"""
-        def Camera "Camera{index}"
-        {{
-            float focalLength = 18.15
-            float horizontalAperture = {horizontal_aperture}
-            float verticalAperture = {horizontal_aperture / aspect:.4f}
-            float2 clippingRange = (0.01, 100000)
-            matrix4d xformOp:transform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
-            uniform token[] xformOpOrder = ["xformOp:transform"]
-        }}"""
-
-
-def _render_product(index: int, width: int, height: int) -> str:
     # BgraColor is LdrColor with red/blue swapped on the GPU by the SPG Swizzle node,
     # which is the BGRA8 layout ovstream expects.
-    return f"""
-    def RenderProduct "Slot{index}" (
+    return f"""#usda 1.0
+(
+    upAxis = "Z"
+    metersPerUnit = 1{sublayers}
+)
+
+def Scope "Viewer"
+{{{sky_light}
+
+    def Xform "Helpers"
+    {{
+        matrix4d xformOp:transform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+{_grid_mesh()}{_axes()}
+    }}
+
+    def Camera "Camera"
+    {{
+        float focalLength = 18.15
+        float horizontalAperture = {horizontal_aperture}
+        float verticalAperture = {horizontal_aperture * height / width:.4f}
+        float2 clippingRange = (0.001, 100000)
+        matrix4d xformOp:transform = ((1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+        uniform token[] xformOpOrder = ["xformOp:transform"]
+    }}
+}}
+
+def Scope "Render"
+{{
+    def RenderProduct "Viewport" (
         prepend apiSchemas = ["OmniRtxPostTonemapAPI_1"]
     )
     {{
@@ -112,7 +130,7 @@ def _render_product(index: int, width: int, height: int) -> str:
         token omni:rtx:post:tonemap:operator = "none"
         uniform int2 resolution = ({width}, {height})
         uint[] deviceIds = [0]
-        rel camera = <{camera_path(index)}>
+        rel camera = <{CAMERA_PATH}>
         rel orderedVars = [<LdrColor>, <BgraColor>]
 
         def RenderVar "LdrColor"
@@ -135,38 +153,6 @@ def _render_product(index: int, width: int, height: int) -> str:
             opaque inputs:Input.connect = <../LdrColor.omni:rtx:aov>
             opaque outputs:Output
         }}
-    }}"""
-
-
-def build_root_layer(scene: str | None, slots: int, width: int, height: int, sky: bool = True) -> str:
-    sublayers = f"\n    subLayers = [@{scene.replace(chr(92), '/')}@]" if scene else ""
-    sky_light = """
-    def DomeLight "Sky"
-    {
-        color3f inputs:color = (1, 1, 1)
-        float inputs:intensity = 1200
-    }""" if sky else ""
-    cameras = "".join(_camera(i, width / height) for i in range(slots))
-    products = "".join(_render_product(i, width, height) for i in range(slots))
-    return f"""#usda 1.0
-(
-    upAxis = "Z"
-    metersPerUnit = 1{sublayers}
-)
-
-def Scope "Viewer"
-{{{sky_light}
-
-    def Scope "Helpers"
-    {{{_grid_mesh()}{_axes()}
     }}
-
-    def Scope "Cameras"
-    {{{cameras}
-    }}
-}}
-
-def Scope "Render"
-{{{products}
 }}
 """
